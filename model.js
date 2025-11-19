@@ -1,115 +1,71 @@
-// model.js
-const tf = require('@tensorflow/tfjs');
-const readyTheAccountFingerprints = require('./readyTheAccountFingerprints');
+const tf = require("@tensorflow/tfjs");
 
-let trainedModel = null;
-let datasetCache = null;
+// pad a single array
+function padArray(arr, targetSize) {
+  if (!Array.isArray(arr)) arr = [arr];
 
-function featureExtractor(fp) {
-  return [
-    fp.imageHash / 1e9,
-    fp.colorDistribution.r / 255,
-    fp.colorDistribution.g / 255,
-    fp.colorDistribution.b / 255,
-    fp.entropy / 10,
-    fp.contrast / 300,
-    fp.meanBrightness / 255,
-    fp.noisePattern / 10,
-    fp.renderingArtifacts
-  ];
+  const copy = [...arr];
+  while (copy.length < targetSize) copy.push(0);
+  return copy.slice(0, targetSize);
 }
 
-async function trainModel() {
-  console.log('🧠 Initializing SessionHalt 2.0 ML Model (once)');
+function diffVector(a, b) {
+  const size = Math.max(a.length || 1, b.length || 1);
 
-  const dataset = readyTheAccountFingerprints();
-  datasetCache = dataset;
+  const aa = padArray(a, size);
+  const bb = padArray(b, size);
 
-  const samePairs = [];
-  const diffPairs = [];
-
-  for (let i = 0; i < dataset.length; i++) {
-    for (let j = i + 1; j < dataset.length; j++) {
-      const a = dataset[i];
-      const b = dataset[j];
-      const sameHardware = a.hardwareGroup === b.hardwareGroup;
-      const label = sameHardware ? 1 : 0;
-      (sameHardware ? samePairs : diffPairs).push({ a, b, label });
-    }
-  }
-
-  console.log(`📊 Training data summary:\n   Same: ${samePairs.length}\n   Diff: ${diffPairs.length}`);
-
-  const pairs = [...samePairs, ...diffPairs];
-  const xs = [];
-  const ys = [];
-
-  pairs.forEach(({ a, b, label }) => {
-    xs.push([...featureExtractor(a.canvasFingerprint), ...featureExtractor(b.canvasFingerprint)]);
-    ys.push([label]);
-  });
-
-  const xTensor = tf.tensor2d(xs);
-  const yTensor = tf.tensor2d(ys);
-
-  const model = tf.sequential();
-  model.add(tf.layers.dense({ inputShape: [xs[0].length], units: 16, activation: 'relu' }));
-  model.add(tf.layers.dense({ units: 8, activation: 'relu' }));
-  model.add(tf.layers.dense({ units: 1, activation: 'sigmoid' }));
-  model.compile({ optimizer: tf.train.adam(0.01), loss: 'binaryCrossentropy', metrics: ['accuracy'] });
-
-  await model.fit(xTensor, yTensor, {
-    epochs: 40,
-    shuffle: true,
-    verbose: 0,
-    callbacks: {
-      onEpochEnd: (epoch, logs) => {
-        if ((epoch + 1) % 10 === 0)
-          console.log(`⚡ Epoch ${epoch + 1}: loss=${logs.loss.toFixed(4)} acc=${logs.acc.toFixed(4)}`);
-      }
-    }
-  });
-
-  const acc = (await model.evaluate(xTensor, yTensor))[1].dataSync()[0].toFixed(4);
-  console.log(`✅ Training complete, final acc: ${acc}`);
-
-  trainedModel = model;
-  return model;
+  return aa.map((v, i) => Math.abs(v - bb[i]) / 255);
 }
 
-async function WorkingCanvasML(currentFP) {
-  if (!trainedModel) {
-    console.log('⚙️ Model not trained yet — training now...');
-    await trainModel();
-  }
+let model = null;
 
-  const threshold = 0.7;
-  const results = [];
+async function trainModel(dataset) {
+  console.log("🚀 Training ML model...");
 
-  for (const known of datasetCache) {
-    const input = tf.tensor2d([
-      [...featureExtractor(currentFP), ...featureExtractor(known.canvasFingerprint)]
-    ]);
-    const prob = trainedModel.predict(input).dataSync()[0];
-    results.push({ device: known.device, prob });
-  }
+  const X = [];
+  const y = [];
 
-  console.log('\n🖥️ Hardware Matching Results:');
-  results.forEach(r => {
-    const mark = r.prob >= threshold ? '✅ SAME' : '❌ DIFF';
-    console.log(`   ${r.device.padEnd(20)}: ${(r.prob * 100).toFixed(1)}% - ${mark}`);
+  const anchor = dataset.anchor;
+
+  dataset.sameHardware.forEach(fp => {
+    X.push(diffVector(anchor, fp));
+    y.push(1);
   });
 
-  const best = results.reduce((a, b) => (a.prob > b.prob ? a : b));
-  const decision = best.prob >= threshold ? 'Legitimate Change' : 'SessionStealer';
+  dataset.differentHardware.forEach(fp => {
+    X.push(diffVector(anchor, fp));
+    y.push(0);
+  });
 
-  console.log(`\n✅ Final Decision: ${decision} (Confidence ${(best.prob * 100).toFixed(1)}%)`);
+  const xs = tf.tensor2d(X);
+  const ys = tf.tensor2d(y, [y.length, 1]);
 
-  return {
-    result: decision,
-    confidence: `${(best.prob * 100).toFixed(1)}%`,
-    matchedDevice: best.device
-  };
+  model = tf.sequential();
+  model.add(tf.layers.dense({ units: 64, activation: "relu", inputShape: [X[0].length] }));
+  model.add(tf.layers.dense({ units: 32, activation: "relu" }));
+  model.add(tf.layers.dense({ units: 1, activation: "sigmoid" }));
+
+  model.compile({
+    optimizer: tf.train.adam(0.005),
+    loss: "binaryCrossentropy"
+  });
+
+  await model.fit(xs, ys, { epochs: 150 });
+
+  console.log("✔ Training complete!");
 }
 
-module.exports = { WorkingCanvasML, trainModel };
+async function predict(anchorFp, testFp) {
+  if (!model) return { error: "Model not trained" };
+
+  const diff = diffVector(anchorFp, testFp);
+  const input = tf.tensor2d([diff]);
+  const output = model.predict(input);
+  const probability = (await output.data())[0];
+
+  return { probability };
+}
+
+module.exports = { trainModel, predict };
+

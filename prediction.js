@@ -1,27 +1,29 @@
-const { WorkingCanvasML, trainModel } = require('./model');
+const { trainModel, predictFingerprint } = require("./model");
 
 class ProductionPredictor {
   constructor() {
     this.ready = false;
     (async () => {
-      await trainModel(); // Train once at startup
+      const realData = require("./readyTheAccountFingerprints")();
+      await trainModel(realData);
       this.ready = true;
     })();
   }
 
-  async predict({ currentFingerprint }) {
+  async predict(fingerprintArray) {
     if (!this.ready) {
-      console.warn('⏳ Model still warming up, please wait...');
+      console.log("⏳ Model warming up...");
+      return { matchProbability: 0 };
     }
-    return await WorkingCanvasML(currentFingerprint.canvasFingerprint);
+    return await predictFingerprint(fingerprintArray);
   }
 
   getSystemHealth() {
-    return { status: 'ok', uptime: process.uptime() };
+    return { status: "ok", uptime: process.uptime() };
   }
 
   getModelInsights() {
-    return { version: 'SessionHalt 2.0', engine: 'TensorFlow.js' };
+    return { version: "Dev Fingerprint v1", engine: "TensorFlow.js", inputLength: 100 };
   }
 }
 

@@ -1,159 +1,88 @@
-// server.js - UPDATED FOR CANVAS FINGERPRINTS
-const express = require('express');
-const cors = require('cors');
-const ProductionPredictor = require('./prediction');
-const readyTheAccountFingerprints = require('./readyTheAccountFingerprints');
-
+const express = require("express");
+const dataset = require("./dataset");
+const ML = require("./model");
+const { predict } = require("./model");   // ← FIXED IMPORT
 const app = express();
-const port = 5000;
+app.use(express.json());
 
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+(async () => {
+  await ML.trainModel(dataset);
+})();
 
-// Initialize predictor
-const predictor = new ProductionPredictor();
+app.post("/predict", async (req, res) => {
+  const fp = req.body.fingerprint;
 
-console.log('🚀 Starting ML Server...');
+  console.log("Received fingerprint:", fp);
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    mlSystem: predictor.getSystemHealth(),
-    timestamp: new Date().toISOString()
-  });
-});
-
-// 🎯 UPDATED PREDICTION ENDPOINT FOR CANVAS FINGERPRINTS
-app.post('/predict', async (req, res) => {
-  console.log('\n🎯 Received prediction request');
-  
-  try {
-    const { current_fingerprint } = req.body;
-    console.log('📦 Request body:', {
-      device: current_fingerprint?.device,
-      hasCanvasFP: !!current_fingerprint?.canvasFingerprint,
-      canvasFields: current_fingerprint?.canvasFingerprint ? Object.keys(current_fingerprint.canvasFingerprint) : 'none'
+  if (!fp || !Array.isArray(fp) || fp.length < 10) {
+    return res.json({
+      success: false,
+      mlResult: { error: "Invalid fingerprint" }
     });
+  }
 
-    // Validate request
-    if (!current_fingerprint || !current_fingerprint.canvasFingerprint) {
-      console.error('❌ Missing canvas fingerprint in request');
-      return res.status(400).json({ 
-        error: "Canvas fingerprint required",
-        expected: {
-          current_fingerprint: {
-            device: "string",
-            canvasFingerprint: {
-              imageHash: "number",
-              colorDistribution: { r: "number", g: "number", b: "number" },
-              gradientPatterns: "array",
-              edgeDetection: "number",
-              noisePattern: "number", 
-              entropy: "number",
-              contrast: "number",
-              meanBrightness: "number",
-              renderingArtifacts: "number"
-            }
-          }
-        }
-      });
+  try {
+    const result = await predict(dataset.anchor, fp);
+    if(result["probability"]>0.95) {
+    return res.json({mlResult: "Legitimate Change", prob:result});
     }
-    // Validate canvas fingerprint structure
-    const canvasFP = current_fingerprint.canvasFingerprint;
-    const requiredFields = [
-      'imageHash', 'colorDistribution', 'gradientPatterns',
-      'edgeDetection', 'noisePattern', 'entropy',
-      'contrast', 'meanBrightness', 'renderingArtifacts'
-    ];
-    for (let field of requiredFields) {
-      if (canvasFP[field] === undefined) {
-        console.error(`❌ Missing canvas field: ${field}`);
-        return res.status(400).json({ 
-          error: `Missing canvas fingerprint field: ${field}`,
-          received: Object.keys(canvasFP)
-        });
+    return res.json({mlResult: "Session Stealer", prob:result});
+  } catch (err) {
+    console.error("Prediction error:", err);
+    return res.json({
+      success: false,
+      mlResult: { error: "Prediction failed" }
+    });
+  }
+});
+app.post("/replace", async (req, res) => {
+  const fp = req.body.fingerprint;
+
+  if (!fp || !Array.isArray(fp) || fp.length < 10) {
+    return res.json({
+      success: false,
+      error: "Invalid fingerprint"
+    });
+  }
+
+  try {
+    let bestMatchIndex = -1;
+    let bestProbability = -1;
+
+    // Compare fingerprint with ALL fingerprints in dataset
+    for (let i = 0; i < dataset.all.length; i++) {
+      const compareFp = dataset.all[i];
+
+      const result = await predict(compareFp, fp);
+
+      if (result.probability > bestProbability) {
+        bestProbability = result.probability;
+        bestMatchIndex = i;
       }
     }
 
-    console.log('✅ Request validation passed', current_fingerprint.accountFingerprint);
-    if(current_fingerprint.accountFingerprint!=null&&current_fingerprint.accountFingerprint!=undefined) {
-  const result = await predictor.predict({
-      currentFingerprint: current_fingerprint,
-      accountFingerprints: current_fingerprint.accountFingerprint
-    });
-console.log('✅ Prediction completed:', {
-      result: result.result,
-      confidence: (result.confidence * 100).toFixed(1) + '%',
-      matchedDevice: result.matchedDevice
-    });
-   res.json(result);
-    }
+    // Determine legitimacy
+    const classification =
+      bestProbability > 0.95 ? "Legitimate Change" : "Session Stealer";
 
-
-    /* // Get account fingerprints
-    const accountFingerprints = readyTheAccountFingerprints();
-    console.log(`📊 Loaded ${accountFingerprints.length} account fingerprints`);
-
-    // Make prediction
-    const result = await predictor.predict({
-      currentFingerprint: current_fingerprint,
-      accountFingerprints: accountFingerprints
+    return res.json({
+      success: true,
+      classification,
+      bestMatchIndex,
+      probability: bestProbability
     });
 
-    console.log('✅ Prediction completed:', {
-      result: result.result,
-      confidence: (result.confidence * 100).toFixed(1) + '%',
-      matchedDevice: result.matchedDevice
-    });
-
-    res.json(result); */
-    
-  } catch (error) {
-    console.error('❌ Prediction error:', error);
-    res.status(500).json({ 
-      error: "Prediction failed",
-      details: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+  } catch (err) {
+    console.error("Replace prediction error:", err);
+    return res.json({
+      success: false,
+      error: "Prediction failed"
     });
   }
 });
 
-// Get system info
-app.get('/system', async (req, res) => {
-  try {
-    const health = predictor.getSystemHealth();
-    const insights = predictor.getModelInsights();
-    
-    res.json({
-      health,
-      insights,
-      accountFingerprints: readyTheAccountFingerprints().map(fp => ({
-        device: fp.device,
-        hasCanvasFP: !!fp.canvasFingerprint
-      }))
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error('🚨 Unhandled error:', error);
-  res.status(500).json({ 
-    error: "Internal server error",
-    message: error.message 
-  });
-});
 
-// Start server
-app.listen(port, () => {
-  console.log(`✅ ML Server running on port ${port}`);
-  console.log(`🔗 Health check: http://localhost:${port}/health`);
-  console.log(`🎯 Predict endpoint: http://localhost:${port}/predict`);
-  console.log(`📊 System info: http://localhost:${port}/system`);
+app.listen(5000, () => {
+  console.log("⚡ ML Fingerprint Server running on port 5000");
 });
-
-module.exports = app;
